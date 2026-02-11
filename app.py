@@ -1,159 +1,148 @@
 import os
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
-import google.generativeai as genai
+from google import genai 
 from docx import Document
+from docx.shared import Pt, Inches
+from docx.enum.text import WD_ALIGN_PARAGRAPH
 from PIL import Image
 from dotenv import load_dotenv
 import threading
+import re
 
 # --- LOAD KONFIGURASI ---
 load_dotenv()
 api_key = os.getenv("GEMINI_API_KEY")
-
-if api_key:
-    genai.configure(api_key=api_key)
+client = genai.Client(api_key=api_key) if api_key else None
 
 class GeminiOCRApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("AI Document Digitizer Pro")
-        self.root.geometry("550x450")
+        self.root.title("AI Form Digitizer - Auto Header")
+        self.root.geometry("500x400")
         self.root.configure(bg="#ffffff")
         
         self.style = ttk.Style()
         self.style.theme_use('clam')
-        self.style.configure("TButton", font=("Segoe UI", 10), padding=6)
-        self.style.configure("Action.TButton", background="#2b579a", foreground="white")
+        self.style.configure("Action.TButton", background="#2b579a", foreground="white", font=("Segoe UI", 10, "bold"))
 
         self.file_path = ""
+        self.container = tk.Frame(root, bg="#ffffff", padx=40, pady=40)
+        self.container.pack(expand=True, fill="both")
 
-        # --- UI LAYOUT ---
-        self.main_container = tk.Frame(root, bg="#ffffff", padx=30, pady=30)
-        self.main_container.pack(expand=True, fill="both")
-
-        tk.Label(self.main_container, text="Gemini OCR Tool", font=("Segoe UI", 18, "bold"), bg="#ffffff", fg="#333333").pack(pady=(0, 5))
-        tk.Label(self.main_container, text="Ekstrak Gambar ke Tabel Word Asli", font=("Segoe UI", 9), bg="#ffffff", fg="#777777").pack(pady=(0, 25))
-
-        self.file_frame = tk.Frame(self.main_container, bg="#f8f9fa", bd=1, relief="solid")
-        self.file_frame.pack(fill="x", pady=10)
-
-        self.lbl_filename = tk.Label(self.file_frame, text="Belum ada file dipilih", font=("Segoe UI", 9, "italic"), bg="#f8f9fa", fg="#999999", padx=10, pady=15)
-        self.lbl_filename.pack(side="left", expand=True)
-
-        self.btn_select = ttk.Button(self.main_container, text="Pilih Gambar", command=self.select_file)
-        self.btn_select.pack(pady=10)
-
-        tk.Frame(self.main_container, height=1, bg="#eeeeee").pack(fill="x", pady=20)
-
-        self.btn_process = ttk.Button(self.main_container, text="Mulai Ekstraksi ke Word", style="Action.TButton", command=self.start_processing_thread)
-        self.btn_process.pack(fill="x", pady=5)
+        tk.Label(self.container, text="Form OCR Precision", font=("Segoe UI", 16, "bold"), bg="#ffffff").pack(pady=(0, 20))
+        
+        ttk.Button(self.container, text="1. Pilih Foto Formulir", command=self.select_file).pack(fill="x", pady=5)
+        self.btn_process = ttk.Button(self.container, text="2. Ekstrak & Rapikan", style="Action.TButton", command=self.start_processing)
+        self.btn_process.pack(fill="x", pady=20)
 
         self.status_var = tk.StringVar(value="Ready")
-        self.lbl_status = tk.Label(self.main_container, textvariable=self.status_var, font=("Segoe UI", 8), bg="#ffffff", fg="#2b579a")
-        self.lbl_status.pack(pady=5)
+        tk.Label(self.container, textvariable=self.status_var, font=("Segoe UI", 9), bg="#ffffff", fg="#666666").pack()
 
     def select_file(self):
-        file_selected = filedialog.askopenfilename(filetypes=[("Images", "*.jpg *.jpeg *.png *.webp")])
-        if file_selected:
-            self.file_path = file_selected
-            self.lbl_filename.config(text=os.path.basename(self.file_path), fg="#333333", font=("Segoe UI", 9, "bold"))
-            self.status_var.set("File siap diproses")
+        self.file_path = filedialog.askopenfilename(filetypes=[("Images", "*.jpg *.jpeg *.png")])
+        if self.file_path:
+            self.status_var.set(f"File: {os.path.basename(self.file_path)}")
 
-    def start_processing_thread(self):
-        if not self.file_path:
-            messagebox.showwarning("Peringatan", "Silakan pilih gambar terlebih dahulu.")
-            return
-        self.btn_process.state(['disabled'])
-        self.btn_select.state(['disabled'])
-        self.status_var.set("Sedang memproses (mohon tunggu)...")
+    def start_processing(self):
+        if not self.file_path: return
+        self.status_var.set("AI sedang menganalisis tata letak...")
         threading.Thread(target=self.process_ocr, daemon=True).start()
-
-    def add_content_to_docx(self, doc, text_result):
-        """Mendeteksi tabel Markdown dan mengonversinya ke tabel Word asli"""
-        lines = text_result.strip().split('\n')
-        i = 0
-        
-        # Daftar kata kunci yang sering muncul di screenshot UI Word (untuk diabaikan)
-        noise_keywords = ["AutoSave", "Protected View", "Enable Editing", "File", "Home", "Insert", "Layout", "References"]
-
-        while i < len(lines):
-            line = lines[i].strip()
-            
-            # Deteksi awal tabel Markdown (baris yang mengandung setidaknya dua karakter '|')
-            if line.count('|') >= 2:
-                table_data = []
-                while i < len(lines) and lines[i].strip().count('|') >= 2:
-                    raw_line = lines[i].strip()
-                    # Lewati baris separator seperti |---|---|
-                    if not all(c in '| -:' for c in raw_line):
-                        # Pecah sel berdasarkan '|' dan bersihkan spasi
-                        cells = [c.strip() for c in raw_line.split('|') if c.strip()]
-                        if cells:
-                            table_data.append(cells)
-                    i += 1
-                
-                if table_data:
-                    # Buat tabel asli di Word
-                    rows = len(table_data)
-                    cols = max(len(row) for row in table_data)
-                    table = doc.add_table(rows=rows, cols=cols)
-                    table.style = 'Table Grid' # Memberikan border
-                    
-                    for r_idx, row_data in enumerate(table_data):
-                        for c_idx, cell_value in enumerate(row_data):
-                            if c_idx < cols:
-                                table.cell(r_idx, c_idx).text = cell_value
-                    doc.add_paragraph() # Jarak setelah tabel
-                continue # Lanjut ke loop berikutnya tanpa menambah i lagi
-            
-            # Jika teks biasa (bukan tabel) dan bukan merupakan menu/UI Word
-            if line and not any(noise in line for noise in noise_keywords):
-                doc.add_paragraph(line)
-            
-            i += 1
 
     def process_ocr(self):
         try:
-            model = genai.GenerativeModel('gemini-2.5-flash')
             img = Image.open(self.file_path)
-
+            
+            # Prompt ditingkatkan untuk memisahkan Header dan Body secara eksplisit
             prompt = (
-                "Ekstrak teks dari gambar ini dengan sangat teliti. "
-                "PENTING: Jika ada tabel, buatlah dalam format tabel Markdown. "
-                "Jangan sertakan elemen UI software seperti nama menu atau status bar. "
-                "Langsung berikan hasil ekstraksi saja tanpa basa-basi."
+                "Lakukan OCR pada formulir ini. Berikan output dengan format berikut:\n"
+                "[HEADER]\n"
+                "(Tulis semua teks header instansi/logo teks, alamat, telp di sini secara berurutan)\n"
+                "[BODY]\n"
+                "(Tulis semua isian formulir dengan format 'Label: Isi'. Hapus titik-titik pengisi ....)\n"
+                "PENTING: Jangan berikan komentar pembuka atau penutup."
             )
             
-            response = model.generate_content([prompt, img])
-            text_result = response.text
+            response = client.models.generate_content(model="gemini-2.5-flash", contents=[prompt, img])
+            raw_text = response.text.strip()
 
             doc = Document()
-            doc.add_heading('Hasil Konversi Formulir', 0)
+            style = doc.styles['Normal']
+            style.font.name = 'Arial'
+            style.font.size = Pt(10)
+
+            # --- PARSING LOGIC ---
+            lines = raw_text.split('\n')
+            mode = "HEADER" # Default mode awal
             
-            self.add_content_to_docx(doc, text_result)
-            
+            # Buat tabel untuk bagian BODY nanti
+            table = None
+
+            for line in lines:
+                line = line.strip()
+                if not line: continue
+                
+                # Cek perubahan mode
+                if "[HEADER]" in line:
+                    mode = "HEADER"
+                    continue
+                if "[BODY]" in line:
+                    mode = "BODY"
+                    # Inisialisasi tabel saat masuk ke mode body
+                    table = doc.add_table(rows=0, cols=2)
+                    table.autofit = False
+                    table.columns[0].width = Inches(2.2)
+                    table.columns[1].width = Inches(3.8)
+                    continue
+
+                if mode == "HEADER":
+                    p = doc.add_paragraph()
+                    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                    run = p.add_run(line)
+                    # Tebalkan jika baris pertama (biasanya nama instansi)
+                    if "OMBUDSMAN" in line.upper() or "REPUBLIK" in line.upper() or "FORMULIR" in line.upper():
+                        run.bold = True
+                        run.font.size = Pt(11)
+
+                elif mode == "BODY" and table:
+                    if ":" in line:
+                        parts = line.split(":", 1)
+                        label = parts[0].strip()
+                        value = re.sub(r'\.{2,}', '', parts[1]).strip()
+
+                        # Deteksi judul section (seperti IDENTITAS PELAPOR)
+                        if label.isupper() and not value:
+                            row = table.add_row().cells
+                            cell = row[0].merge(row[1])
+                            p = cell.paragraphs[0]
+                            p.add_run(label).bold = True
+                            p.add_run().underline = True
+                        else:
+                            row_cells = table.add_row().cells
+                            row_cells[0].text = label
+                            row_cells[0].paragraphs[0].runs[0].bold = True
+                            row_cells[1].text = ": " + (value if value else "-")
+                    else:
+                        # Jika teks biasa tanpa titik dua di dalam body
+                        row = table.add_row().cells
+                        row[0].merge(row[1]).text = line
+
             self.root.after(0, self.save_document, doc)
 
-        except Exception as err:
-            self.root.after(0, lambda e=err: messagebox.showerror("Error", f"Gagal memproses: {str(e)}"))
+        except Exception as e:
+            self.root.after(0, lambda err=e: messagebox.showerror("Error", str(err)))
         finally:
             self.root.after(0, self.reset_ui)
 
     def save_document(self, doc):
-        save_path = filedialog.asksaveasfilename(
-            defaultextension=".docx",
-            filetypes=[("Word Document", "*.docx")],
-            initialfile=os.path.splitext(os.path.basename(self.file_path))[0] + "_hasil"
-        )
+        save_path = filedialog.asksaveasfilename(defaultextension=".docx", filetypes=[("Word", "*.docx")])
         if save_path:
             doc.save(save_path)
-            messagebox.showinfo("Sukses", "Dokumen berhasil disimpan dengan tabel asli!")
+            messagebox.showinfo("Sukses", "Dokumen otomatis berhasil dibuat!")
+        self.status_var.set("Ready")
 
     def reset_ui(self):
         self.btn_process.state(['!disabled'])
-        self.btn_select.state(['!disabled'])
-        self.status_var.set("Ready")
 
 if __name__ == "__main__":
     root = tk.Tk()
