@@ -18,7 +18,7 @@ client = genai.Client(api_key=api_key) if api_key else None
 class GeminiOCRApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("AI Form Digitizer - Auto Header")
+        self.root.title("AI Form Digitizer - Pro Layout v4")
         self.root.geometry("500x400")
         self.root.configure(bg="#ffffff")
         
@@ -30,10 +30,10 @@ class GeminiOCRApp:
         self.container = tk.Frame(root, bg="#ffffff", padx=40, pady=40)
         self.container.pack(expand=True, fill="both")
 
-        tk.Label(self.container, text="Form OCR Precision", font=("Segoe UI", 16, "bold"), bg="#ffffff").pack(pady=(0, 20))
+        tk.Label(self.container, text="Form OCR Precision v4", font=("Segoe UI", 16, "bold"), bg="#ffffff").pack(pady=(0, 20))
         
         ttk.Button(self.container, text="1. Pilih Foto Formulir", command=self.select_file).pack(fill="x", pady=5)
-        self.btn_process = ttk.Button(self.container, text="2. Ekstrak & Rapikan", style="Action.TButton", command=self.start_processing)
+        self.btn_process = ttk.Button(self.container, text="2. Ekstrak & Tampilkan Tabel", style="Action.TButton", command=self.start_processing)
         self.btn_process.pack(fill="x", pady=20)
 
         self.status_var = tk.StringVar(value="Ready")
@@ -46,50 +46,56 @@ class GeminiOCRApp:
 
     def start_processing(self):
         if not self.file_path: return
-        self.status_var.set("AI sedang menganalisis tata letak...")
+        self.status_var.set("Membangun tabel dan grid...")
         threading.Thread(target=self.process_ocr, daemon=True).start()
+
+    def format_run(self, paragraph, text, is_bold=False, size=10):
+        """Helper untuk memastikan font setiap baris konsisten di dalam tabel"""
+        run = paragraph.add_run(text)
+        run.font.name = 'Arial'
+        run.font.size = Pt(size)
+        run.bold = is_bold
+        return run
 
     def process_ocr(self):
         try:
             img = Image.open(self.file_path)
             
-            # Prompt ditingkatkan untuk memisahkan Header dan Body secara eksplisit
             prompt = (
-                "Lakukan OCR pada formulir ini. Berikan output dengan format berikut:\n"
+                "Lakukan OCR pada formulir ini. Berikan output dengan format:\n"
                 "[HEADER]\n"
-                "(Tulis semua teks header instansi/logo teks, alamat, telp di sini secara berurutan)\n"
+                "(Teks header instansi)\n"
                 "[BODY]\n"
-                "(Tulis semua isian formulir dengan format 'Label: Isi'. Hapus titik-titik pengisi ....)\n"
-                "PENTING: Jangan berikan komentar pembuka atau penutup."
+                "(Format 'Label: Isi'. Untuk kotak/checkbox, gunakan simbol [ ] atau [X] jika terisi. "
+                "PENTING: JANGAN sertakan titik-titik pengisi ....)\n"
+                "Abaikan teks penjelasan AI."
             )
             
+            # Menggunakan model terbaru gemini-2.0-flash
             response = client.models.generate_content(model="gemini-2.5-flash", contents=[prompt, img])
             raw_text = response.text.strip()
 
             doc = Document()
-            style = doc.styles['Normal']
-            style.font.name = 'Arial'
-            style.font.size = Pt(10)
+            # Set default font dokumen
+            doc.styles['Normal'].font.name = 'Arial'
+            doc.styles['Normal'].font.size = Pt(10)
 
-            # --- PARSING LOGIC ---
             lines = raw_text.split('\n')
-            mode = "HEADER" # Default mode awal
-            
-            # Buat tabel untuk bagian BODY nanti
+            mode = "HEADER"
             table = None
 
             for line in lines:
                 line = line.strip()
                 if not line: continue
                 
-                # Cek perubahan mode
                 if "[HEADER]" in line:
                     mode = "HEADER"
                     continue
                 if "[BODY]" in line:
                     mode = "BODY"
-                    # Inisialisasi tabel saat masuk ke mode body
+                    # --- FIX: MENAMPILKAN GARIS TABEL ---
                     table = doc.add_table(rows=0, cols=2)
+                    table.style = 'Table Grid' # Membuat garis tabel terlihat 
                     table.autofit = False
                     table.columns[0].width = Inches(2.2)
                     table.columns[1].width = Inches(3.8)
@@ -98,11 +104,8 @@ class GeminiOCRApp:
                 if mode == "HEADER":
                     p = doc.add_paragraph()
                     p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                    run = p.add_run(line)
-                    # Tebalkan jika baris pertama (biasanya nama instansi)
-                    if "OMBUDSMAN" in line.upper() or "REPUBLIK" in line.upper() or "FORMULIR" in line.upper():
-                        run.bold = True
-                        run.font.size = Pt(11)
+                    is_big = any(x in line.upper() for x in ["OMBUDSMAN", "FORMULIR"])
+                    self.format_run(p, line, is_bold=is_big, size=11 if is_big else 9)
 
                 elif mode == "BODY" and table:
                     if ":" in line:
@@ -110,22 +113,20 @@ class GeminiOCRApp:
                         label = parts[0].strip()
                         value = re.sub(r'\.{2,}', '', parts[1]).strip()
 
-                        # Deteksi judul section (seperti IDENTITAS PELAPOR)
                         if label.isupper() and not value:
                             row = table.add_row().cells
                             cell = row[0].merge(row[1])
-                            p = cell.paragraphs[0]
-                            p.add_run(label).bold = True
-                            p.add_run().underline = True
+                            self.format_run(cell.paragraphs[0], label, is_bold=True, size=10)
                         else:
                             row_cells = table.add_row().cells
-                            row_cells[0].text = label
-                            row_cells[0].paragraphs[0].runs[0].bold = True
-                            row_cells[1].text = ": " + (value if value else "-")
+                            self.format_run(row_cells[0].paragraphs[0], label, is_bold=True)
+                            
+                            # Mengonversi checkbox teks ke simbol kotak agar rapi
+                            clean_val = value.replace("[ ]", "□").replace("[X]", "▣")
+                            self.format_run(row_cells[1].paragraphs[0], ": " + (clean_val if clean_val else "-"))
                     else:
-                        # Jika teks biasa tanpa titik dua di dalam body
                         row = table.add_row().cells
-                        row[0].merge(row[1]).text = line
+                        self.format_run(row[0].merge(row[1]).paragraphs[0], line)
 
             self.root.after(0, self.save_document, doc)
 
@@ -138,7 +139,7 @@ class GeminiOCRApp:
         save_path = filedialog.asksaveasfilename(defaultextension=".docx", filetypes=[("Word", "*.docx")])
         if save_path:
             doc.save(save_path)
-            messagebox.showinfo("Sukses", "Dokumen otomatis berhasil dibuat!")
+            messagebox.showinfo("Sukses", "Tabel dan data berhasil dibuat dengan garis yang terlihat!")
         self.status_var.set("Ready")
 
     def reset_ui(self):
