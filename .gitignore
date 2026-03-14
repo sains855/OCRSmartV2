@@ -1,1 +1,8 @@
 /.env
+/config.json
+/dist
+/.dist
+/app.dist
+/build
+/venv
+/ apk-ombudsman
